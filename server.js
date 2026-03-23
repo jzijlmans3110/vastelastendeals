@@ -63,7 +63,8 @@ function gesprekOverzicht(id, g) {
     geëindigd: g.geëindigd || null,
     duur: g.duur || null,
     twilioSid: g.twilioSid || null,
-    historyCount: g.history?.length || 0
+    historyCount: g.history?.length || 0,
+    kwalificatie: g.kwalificatie || null
   };
 }
 
@@ -76,32 +77,109 @@ function veiligeTekstVoorTTS(text) {
     .trim();
 }
 
+function haalKwalificatieUitGeschiedenis(gesprek) {
+  const allText = (gesprek.history || [])
+    .map((h) => h.content || '')
+    .join(' \n ')
+    .toLowerCase();
+
+  const kwalificatie = {
+    contract_type: gesprek.kwalificatie?.contract_type || 'onbekend',
+    open_to_switch: gesprek.kwalificatie?.open_to_switch || 'onbekend',
+    monthly_amount: gesprek.kwalificatie?.monthly_amount || null,
+    supplier: gesprek.kwalificatie?.supplier || null,
+    appointment_interest: gesprek.kwalificatie?.appointment_interest || 'onbekend'
+  };
+
+  if (allText.includes('variabel')) kwalificatie.contract_type = 'variabel';
+  if (allText.includes('vast')) kwalificatie.contract_type = 'vast';
+
+  const openSwitchSignals = [
+    'open voor overstappen',
+    'wil overstappen',
+    'interesse',
+    'ja graag',
+    'prima',
+    'is goed',
+    'mag wel',
+    'sta ervoor open'
+  ];
+  if (openSwitchSignals.some((s) => allText.includes(s))) {
+    kwalificatie.open_to_switch = 'ja';
+  }
+
+  const noSwitchSignals = [
+    'geen interesse',
+    'wil niet overstappen',
+    'niet overstappen',
+    'geen behoefte',
+    'laat maar',
+    'niet nodig'
+  ];
+  if (noSwitchSignals.some((s) => allText.includes(s))) {
+    kwalificatie.open_to_switch = 'nee';
+  }
+
+  gesprek.kwalificatie = kwalificatie;
+  return kwalificatie;
+}
+
 async function genereerAntwoord(gesprek) {
   const slotInfo = gesprek.vrijeSlots?.length
     ? 'Beschikbare afspraakmomenten: ' + gesprek.vrijeSlots.slice(0, 3).map((s) => s.label).join(', ') + '.'
-    : 'De agenda is op dit moment beperkt beschikbaar.';
+    : 'Er zijn momenteel geen directe vrije momenten zichtbaar in de agenda.';
+
+  const alBekend = haalKwalificatieUitGeschiedenis(gesprek);
 
   const system = [
-    `Je bent Eva, een zeer natuurlijke Nederlandse telefoonagent voor ${process.env.BEDRIJF_NAAM || 'Vaste Lasten Deals'}.`,
-    'Je belt prospects kort en duidelijk over een energieaanbod.',
-    'Spreek vloeiend Nederlands.',
-    'Klink warm, menselijk, zelfverzekerd en professioneel.',
-    'Gebruik korte zinnen die goed klinken in spraak.',
+    `Je bent Eva, een ultrarealistische Nederlandse outbound sales agent voor ${process.env.BEDRIJF_NAAM || 'Vaste Lasten Deals'}.`,
+    'Je belt ondernemers over hun zakelijke energiecontract en de huidige voorwaarden.',
+    'Je klinkt als een echte Nederlandse accountmanager: warm, professioneel, adviserend, menselijk en zelfverzekerd.',
+    'Je spreekt natuurlijk Nederlands dat goed klinkt op telefoon.',
+    'Gebruik korte spreektaalzinnen.',
     'Gebruik maximaal 2 of 3 zinnen per beurt.',
-    'Wees commercieel maar niet opdringerig.',
-    'Stuur rustig richting een afspraak als er interesse is.',
+    'Stel maximaal 1 hoofdvraag tegelijk.',
+    'Praat nooit als een robot of scriptlezer.',
+    'Je bent commercieel slim, maar nooit opdringerig.',
+    'Je doel is NIET om direct te closen tijdens de call.',
+    'Je doel is om de ondernemer te kwalificeren en alleen bij geschiktheid naar een afspraak toe te werken.',
+    'Je moet tijdens het gesprek achterhalen:',
+    '1. Of de ondernemer variabel zit of vast',
+    '2. Of de ondernemer openstaat om over te stappen',
+    '3. Wat het maandbedrag ongeveer is',
+    '4. Bij welke leverancier de ondernemer momenteel zit',
+    'Vraag nooit opnieuw naar informatie die al duidelijk is gegeven.',
+    `Reeds bekende kwalificatie: contract_type=${alBekend.contract_type}, open_to_switch=${alBekend.open_to_switch}, monthly_amount=${alBekend.monthly_amount || 'onbekend'}, supplier=${alBekend.supplier || 'onbekend'}, appointment_interest=${alBekend.appointment_interest}.`,
+    'Hanteer bij voorkeur deze natuurlijke volgorde:',
+    'eerst kort de reden van bellen, daarna variabel of vast, daarna openstaan voor overstappen, daarna leverancier, daarna maandbedrag, daarna pas eventueel een afspraak.',
+    'Vraag naar maandbedrag op een rustige, niet-pushy manier.',
+    'Als de ondernemer gehaast klinkt, word korter en directer.',
+    'Als de ondernemer sceptisch klinkt, blijf kalm, feitelijk en niet pushy.',
+    'Als de ondernemer positief klinkt, vat rustig samen en stuur logisch richting een afspraak.',
+    'Als de ondernemer geen interesse heeft, rond professioneel af.',
+    'Zeg nooit dat iets gegarandeerd goedkoper is als dat niet bewezen is.',
+    'Verzin nooit contractgegevens, bedragen of leveranciers.',
+    'Gebruik natuurlijke bevestigingen zoals: begrijpelijk, helemaal goed, duidelijk, ik snap het, logisch.',
+    'Zodra alle 4 kwalificatiepunten duidelijk zijn én de lead openstaat voor overstappen, stuur dan naar een korte afspraak met een specialist.',
+    'Als iemand vast zit en niet wil overstappen, probeer niet te pushen.',
+    'Als iemand om mail vraagt, probeer eerst heel kort de noodzakelijke context op te halen.',
     slotInfo
   ].join(' ');
 
   const messages = gesprek.history.length
     ? gesprek.history.map((h) => ({ role: h.role, content: h.content }))
-    : [{ role: 'user', content: 'Begin het gesprek kort, vriendelijk en professioneel.' }];
+    : [
+        {
+          role: 'user',
+          content: 'Begin het gesprek nu met een korte, natuurlijke opening voor een ondernemer die je belt over zakelijke energievoorwaarden.'
+        }
+      ];
 
   const resp = await axios.post(
     'https://api.anthropic.com/v1/messages',
     {
       model: 'claude-sonnet-4-20250514',
-      max_tokens: 180,
+      max_tokens: 220,
       system,
       messages
     },
@@ -125,9 +203,9 @@ async function genAudioViaElevenLabs(tekst, id) {
       text: veiligeTekstVoorTTS(tekst),
       model_id: 'eleven_multilingual_v2',
       voice_settings: {
-        stability: 0.35,
+        stability: 0.32,
         similarity_boost: 0.9,
-        style: 0.45,
+        style: 0.42,
         use_speaker_boost: true
       }
     },
@@ -159,7 +237,7 @@ async function spreekEnLuister(twiml, tekst, gesprekId) {
 
   twiml.play(audioUrl);
 
-  const gather = twiml.gather({
+  twiml.gather({
     input: 'speech',
     language: 'nl-NL',
     speechTimeout: 'auto',
@@ -167,14 +245,11 @@ async function spreekEnLuister(twiml, tekst, gesprekId) {
     action: `${process.env.SERVER_URL}/twilio/gather/${gesprekId}`,
     method: 'POST'
   });
-
-  gather.pause({ length: 1 });
 }
 
 async function spreekEnSluitAf(twiml, tekst) {
   const audioId = `af_${Date.now()}`;
   const audioUrl = await genAudioViaElevenLabs(tekst, audioId);
-
   twiml.play(audioUrl);
   twiml.hangup();
 }
@@ -209,7 +284,14 @@ async function startGesprekEnBel({ naam, telefoon, stad, email }) {
     resultaat: null,
     vrijeSlots,
     wachtOpSlotKeuze: false,
-    metadata: {}
+    metadata: {},
+    kwalificatie: {
+      contract_type: 'onbekend',
+      open_to_switch: 'onbekend',
+      monthly_amount: null,
+      supplier: null,
+      appointment_interest: 'onbekend'
+    }
   });
 
   log('TWILIO CALL CREATE START', {
@@ -247,8 +329,8 @@ async function startGesprekEnBel({ naam, telefoon, stad, email }) {
 app.get('/', (req, res) => {
   res.json({
     status: 'AI Beller backend actief',
-    versie: '5.0.0',
-    mode: 'full-elevenlabs-phone'
+    versie: '6.0.0',
+    mode: 'full-elevenlabs-business-energy'
   });
 });
 
@@ -338,9 +420,9 @@ app.post('/api/elevenlabs/tts/:voiceId?', async (req, res) => {
         text,
         model_id: 'eleven_multilingual_v2',
         voice_settings: {
-          stability: 0.35,
+          stability: 0.32,
           similarity_boost: 0.9,
-          style: 0.45,
+          style: 0.42,
           use_speaker_boost: true
         }
       },
@@ -544,7 +626,7 @@ app.post('/twilio/answer/:gesprekId', async (req, res) => {
   gesprek.status = 'in_gesprek';
 
   const opening = veiligeTekstVoorTTS(
-    `Goedemiddag, spreek ik met ${gesprek.naam}? U spreekt met Eva van ${process.env.BEDRIJF_NAAM || 'Vaste Lasten Deals'}. Ik bel u kort over een gunstig energieaanbod. Kunt u mij goed verstaan?`
+    `Goedemiddag, spreek ik met ${gesprek.naam}? U spreekt met Eva van ${process.env.BEDRIJF_NAAM || 'Vaste Lasten Deals'}. Ik bel even kort omdat we ondernemers helpen om te kijken of hun zakelijke energievoorwaarden nog gunstig zijn, vooral als ze variabel zitten. Kom ik heel kort gelegen?`
   );
 
   gesprek.history.push({ role: 'assistant', content: opening });
@@ -560,7 +642,7 @@ app.post('/twilio/answer/:gesprekId', async (req, res) => {
     twiml.say({ language: 'nl-NL', voice: 'Polly.Lotte' }, opening);
   }
 
-  const gather = twiml.gather({
+  twiml.gather({
     input: 'speech',
     language: 'nl-NL',
     speechTimeout: 'auto',
@@ -568,8 +650,6 @@ app.post('/twilio/answer/:gesprekId', async (req, res) => {
     action: `${process.env.SERVER_URL}/twilio/gather/${req.params.gesprekId}`,
     method: 'POST'
   });
-
-  gather.pause({ length: 1 });
 
   return res.type('text/xml').send(twiml.toString());
 });
@@ -606,14 +686,14 @@ app.post('/twilio/gather/:gesprekId', async (req, res) => {
     try {
       await spreekEnLuister(
         twiml,
-        'Ik heb u niet goed verstaan. Kunt u dat alstublieft herhalen?',
+        'Ik heb u niet helemaal goed verstaan. Kunt u dat nog één keer herhalen?',
         gesprekId
       );
     } catch (err) {
       log('GEEN SPRAAK / ELEVENLABS FOUT:', err.message);
       twiml.say(
         { language: 'nl-NL', voice: 'Polly.Lotte' },
-        'Ik heb u niet goed verstaan. Kunt u dat alstublieft herhalen?'
+        'Ik heb u niet helemaal goed verstaan. Kunt u dat nog één keer herhalen?'
       );
     }
 
@@ -624,7 +704,20 @@ app.post('/twilio/gather/:gesprekId', async (req, res) => {
 
   const klantTekstLower = klantTekst.toLowerCase();
 
-  const optOutWoorden = ['verwijder', 'afmelden', 'bel niet meer', 'nooit meer', 'stop', 'geen interesse'];
+  if (klantTekstLower.includes('variabel')) gesprek.kwalificatie.contract_type = 'variabel';
+  if (klantTekstLower.includes('vast')) gesprek.kwalificatie.contract_type = 'vast';
+
+  const positiveWords = ['ja', 'prima', 'graag', 'interesse', 'kan', 'mag', 'open'];
+  const negativeWords = ['nee', 'geen interesse', 'niet nodig', 'laat maar', 'hoeft niet'];
+
+  if (positiveWords.some((w) => klantTekstLower.includes(w))) {
+    gesprek.kwalificatie.appointment_interest = 'ja';
+  }
+  if (negativeWords.some((w) => klantTekstLower.includes(w))) {
+    gesprek.kwalificatie.appointment_interest = 'nee';
+  }
+
+  const optOutWoorden = ['verwijder', 'afmelden', 'bel niet meer', 'nooit meer', 'stop'];
   if (optOutWoorden.some((w) => klantTekstLower.includes(w))) {
     gesprek.status = 'afgerond';
     gesprek.resultaat = 'opt_out';
@@ -632,13 +725,13 @@ app.post('/twilio/gather/:gesprekId', async (req, res) => {
     try {
       await spreekEnSluitAf(
         twiml,
-        'Begrijpelijk. We zullen uw gegevens niet verder gebruiken. Bedankt en nog een fijne dag.'
+        'Begrijpelijk, helemaal goed. We laten het hierbij en zullen u hiervoor niet opnieuw benaderen. Nog een fijne dag.'
       );
     } catch (err) {
       log('OPT OUT ELEVENLABS FOUT:', err.message);
       twiml.say(
         { language: 'nl-NL', voice: 'Polly.Lotte' },
-        'Begrijpelijk. We zullen uw gegevens niet verder gebruiken. Bedankt en nog een fijne dag.'
+        'Begrijpelijk, helemaal goed. We laten het hierbij en zullen u hiervoor niet opnieuw benaderen. Nog een fijne dag.'
       );
       twiml.hangup();
     }
@@ -671,7 +764,7 @@ app.post('/twilio/gather/:gesprekId', async (req, res) => {
         };
 
         const bevestiging = veiligeTekstVoorTTS(
-          `Perfect. Ik heb de afspraak ingepland op ${gekozenSlot.label}. U ontvangt hiervan een bevestiging. Nog een fijne dag.`
+          `Perfect, dan heb ik dat moment voor u genoteerd op ${gekozenSlot.label}. U ontvangt daarvan een bevestiging. Fijne dag nog.`
         );
 
         gesprek.history.push({ role: 'assistant', content: bevestiging });
@@ -691,13 +784,13 @@ app.post('/twilio/gather/:gesprekId', async (req, res) => {
         try {
           await spreekEnLuister(
             twiml,
-            'Het lukt op dit moment niet om de afspraak direct vast te leggen. Ik kan wel een terugbelverzoek voor u noteren. Heeft u daar interesse in?',
+            'Het inplannen lukt op dit moment niet direct. Ik kan wel laten zorgen dat iemand u kort terugbelt. Is dat goed?',
             gesprekId
           );
         } catch (e) {
           twiml.say(
             { language: 'nl-NL', voice: 'Polly.Lotte' },
-            'Het lukt op dit moment niet om de afspraak direct vast te leggen. Ik kan wel een terugbelverzoek voor u noteren. Heeft u daar interesse in?'
+            'Het inplannen lukt op dit moment niet direct. Ik kan wel laten zorgen dat iemand u kort terugbelt. Is dat goed?'
           );
         }
 
@@ -708,13 +801,13 @@ app.post('/twilio/gather/:gesprekId', async (req, res) => {
     try {
       await spreekEnLuister(
         twiml,
-        'Ik kon het gekozen tijdstip niet goed herkennen. Wilt u een van de genoemde momenten herhalen?',
+        'Ik kon het gekozen moment niet helemaal goed plaatsen. Wilt u het tijdstip nog één keer noemen?',
         gesprekId
       );
     } catch (err) {
       twiml.say(
         { language: 'nl-NL', voice: 'Polly.Lotte' },
-        'Ik kon het gekozen tijdstip niet goed herkennen. Wilt u een van de genoemde momenten herhalen?'
+        'Ik kon het gekozen moment niet helemaal goed plaatsen. Wilt u het tijdstip nog één keer noemen?'
       );
     }
 
@@ -723,6 +816,7 @@ app.post('/twilio/gather/:gesprekId', async (req, res) => {
 
   if (wilAfspraak && !gesprek.wachtOpSlotKeuze) {
     gesprek.wachtOpSlotKeuze = true;
+    gesprek.kwalificatie.appointment_interest = 'ja';
 
     if (!gesprek.vrijeSlots?.length) {
       try {
@@ -734,7 +828,7 @@ app.post('/twilio/gather/:gesprekId', async (req, res) => {
 
     if (gesprek.vrijeSlots.length) {
       const slotTekst = slotsAlsTekst(gesprek.vrijeSlots);
-      const antwoord = veiligeTekstVoorTTS(`Graag. ${slotTekst} Welk moment past u het beste?`);
+      const antwoord = veiligeTekstVoorTTS(`Helemaal goed. ${slotTekst} Welk moment zou u het beste uitkomen?`);
 
       gesprek.history.push({ role: 'assistant', content: antwoord });
 
@@ -748,7 +842,7 @@ app.post('/twilio/gather/:gesprekId', async (req, res) => {
     }
 
     const fallbackAntwoord = veiligeTekstVoorTTS(
-      'Prima. Ik zie op dit moment geen vrije momenten in de agenda. Ik kan wel laten terugbellen door een medewerker. Is dat goed?'
+      'Prima. Ik zie op dit moment geen direct vrij moment in de agenda. Ik kan wel zorgen dat iemand u kort terugbelt. Is dat goed?'
     );
 
     gesprek.history.push({ role: 'assistant', content: fallbackAntwoord });
@@ -791,13 +885,13 @@ app.post('/twilio/gather/:gesprekId', async (req, res) => {
     try {
       await spreekEnLuister(
         twiml,
-        'Excuses, er ging iets mis aan onze kant. Wilt u aangeven of u interesse heeft in een afspraak?',
+        'Excuses, er ging iets mis aan mijn kant. Mag ik u heel kort vragen of u momenteel variabel zit of vast?',
         gesprekId
       );
     } catch (e) {
       twiml.say(
         { language: 'nl-NL', voice: 'Polly.Lotte' },
-        'Excuses, er ging iets mis aan onze kant. Wilt u aangeven of u interesse heeft in een afspraak?'
+        'Excuses, er ging iets mis aan mijn kant. Mag ik u heel kort vragen of u momenteel variabel zit of vast?'
       );
     }
 
