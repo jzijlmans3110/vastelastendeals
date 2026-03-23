@@ -77,6 +77,20 @@ function gesprekOverzicht(id, g) {
   };
 }
 
+function kiesOpening(naam) {
+  const openingen = [
+    `Goedemiddag, u spreekt met Eva van ${process.env.BEDRIJF_NAAM || 'Vaste Lasten Deals'}. Ik bel even heel kort. Spreek ik met ${naam}?`,
+    `Goedemiddag, Eva hier van ${process.env.BEDRIJF_NAAM || 'Vaste Lasten Deals'}. Kom ik heel kort gelegen?`,
+    `Hallo, goedemiddag, u spreekt met Eva van ${process.env.BEDRIJF_NAAM || 'Vaste Lasten Deals'}. Ik wilde heel even iets checken rondom uw zakelijke energiecontract.`,
+    `Goedemiddag, met Eva van ${process.env.BEDRIJF_NAAM || 'Vaste Lasten Deals'}. Ik bel even kort omdat we ondernemers helpen kijken of ze nog gunstig zitten.`,
+    `Goedemiddag, Eva hier. Ik bel heel even kort over uw zakelijke energiecontract. Spreek ik gelegen?`,
+    `Hallo, goedemiddag. U spreekt met Eva van ${process.env.BEDRIJF_NAAM || 'Vaste Lasten Deals'}. Ik had u heel even nodig voor een korte check.`,
+    `Goedemiddag, met Eva van ${process.env.BEDRIJF_NAAM || 'Vaste Lasten Deals'}. Ik houd het kort hoor. Ik wilde even iets aan u voorleggen.`,
+    `Hallo, Eva hier van ${process.env.BEDRIJF_NAAM || 'Vaste Lasten Deals'}. Ik bel even heel kort met een vraag over uw huidige energiecontract.`
+  ];
+  return openingen[Math.floor(Math.random() * openingen.length)];
+}
+
 function updateKwalificatieUitTekst(gesprek, tekst) {
   if (!tekst) return;
 
@@ -103,7 +117,8 @@ function updateKwalificatieUitTekst(gesprek, tekst) {
     'interesse',
     'open voor',
     'zou wel willen',
-    'zou ik wel willen'
+    'zou ik wel willen',
+    'best'
   ];
   if (openSignals.some((s) => t.includes(s))) {
     gesprek.kwalificatie.open_to_switch = 'ja';
@@ -161,9 +176,9 @@ async function genAudioViaElevenLabs(tekst, id) {
       text: veiligeTekstVoorTTS(tekst),
       model_id: 'eleven_multilingual_v2',
       voice_settings: {
-        stability: 0.28,
-        similarity_boost: 0.92,
-        style: 0.48,
+        stability: 0.18,
+        similarity_boost: 0.88,
+        style: 0.62,
         use_speaker_boost: true
       }
     },
@@ -233,32 +248,58 @@ Je belt ondernemers over hun zakelijke energiecontract.
 Je klinkt menselijk. Warm. Rustig. Zelfverzekerd. Natuurlijk.
 Niet overdreven vrolijk. Niet te commercieel. Niet callcenter-achtig.
 
+JE SPREEKT ALS EEN ECHTE NEDERLANDSE BUITENDIENSTMEDEWERKER:
+- niet te netjes
+- niet te perfect
+- niet te glad
+- niet te formeel
+
 HEEL BELANGRIJK VOOR SPRAAK EN INTONATIE:
 - Schrijf zoals iemand echt praat.
 - Gebruik korte zinnen.
 - Gebruik natuurlijke komma's, punten, kleine onderbrekingen.
-- Gebruik af en toe woorden zoals:
-  "helemaal goed",
+- Gebruik vaak 2 korte zinnen in plaats van 1 lange.
+- Gebruik kleine natuurlijke overgangen zoals:
+  "ja, duidelijk",
   "snap ik",
-  "begrijpelijk",
+  "helemaal goed",
+  "ja precies",
+  "is goed hoor",
   "even kijken",
-  "duidelijk",
-  "ja precies".
-- Gebruik geen lange alinea's.
-- Gebruik geen stijve of te perfecte taal.
+  "logisch",
+  "helder".
+- Gebruik af en toe een zachte aarzelingsfrase zoals:
+  "eh",
+  "even denken",
+  "eens kijken",
+  maar heel subtiel en niet in elke beurt.
+- Begin niet elke beurt direct met een vraag.
+- Geef eerst een mini-reactie, dan pas de vraag.
+- Gebruik geen perfecte, complete schrijftaal.
+- Gebruik echte spreektaal.
+- Laat zinnen soms klein en onvolledig zijn, zolang ze natuurlijk klinken.
+- Gebruik maximaal 10 tot 18 woorden per zin.
 - Gebruik 1 tot 3 zinnen per beurt.
 - Stel maximaal 1 hoofdvraag tegelijk.
-- Laat zinnen natuurlijk lopen, bijvoorbeeld:
-  "Helemaal goed, duidelijk. Mag ik u dan heel kort iets vragen?"
-  of
-  "Snap ik. En zit u op dit moment nog steeds variabel?"
-- Laat gevoelige vragen zachter klinken door ze kleiner te maken:
-  "Weet u toevallig ook, een beetje globaal, wat u per maand betaalt?"
-- Gebruik geen bullet points in je antwoord.
-- Je output moet ALTIJD klinken alsof iemand het uitspreekt aan de telefoon.
+- Vermijd stijve zinnen en marketingtaal.
+- Schrijf alsof je belt, niet alsof je mailt.
+- Laat antwoorden klinken alsof ze hardop uitgesproken worden.
+
+VOORBEELDEN VAN GOEDE FORMULERING:
+- "Snap ik helemaal. Mag ik u heel kort iets vragen?"
+- "Ja, duidelijk. Zit u op dit moment nog variabel of vast?"
+- "Helemaal goed. En stel dat het gunstiger kan, zou u daar dan voor openstaan?"
+- "Is goed hoor. Weet u toevallig bij wie het nu loopt?"
+- "En een beetje globaal, waar zit u per maand ongeveer op?"
+
+VOORBEELDEN VAN SLECHTE FORMULERING:
+- "Zou u de overweging nemen om over te stappen?"
+- "Wat is uw huidige maandbedrag?"
+- "Bij welke leverancier zit u momenteel?"
+- "Wij kunnen u een optimale oplossing aanbieden."
 
 DOEL VAN HET GESPREK:
-Je doel is niet om direct iets te verkopen.
+Je doel is niet om direct te verkopen.
 Je doel is om te kwalificeren, en daarna pas rustig naar een afspraak toe te werken.
 
 JE MOET ACHTERHALEN:
@@ -284,23 +325,15 @@ GESPREKSSTRUCTUUR:
 - Daarna pas leverancier en maandbedrag.
 - Pas als de lead geschikt klinkt, stuur je naar een afspraak.
 
-TOON:
-- Kalm.
-- Echt.
-- Licht adviserend.
-- Nooit pushy.
-- Licht informeel zakelijk.
-- Alsof je iemand even tussendoor belt.
-
 ALS IEMAND DRUK IS:
 Erken dat eerst.
-Voorbeeldtoon:
+Bijvoorbeeld:
 "Snap ik helemaal. Dan houd ik het ook echt kort."
 
 ALS IEMAND TWIJFELT:
 Druk niet door.
-Voorbeeldtoon:
-"Begrijpelijk hoor. Ik vraag het vooral even, omdat het in sommige gevallen toch interessant kan zijn om ernaar te kijken."
+Bijvoorbeeld:
+"Begrijpelijk hoor. Ik vraag het vooral even, omdat het soms toch interessant kan zijn om ernaar te kijken."
 
 ALS IEMAND OPEN KLINKT:
 Vat kort samen en ga rustig richting afspraak.
@@ -317,13 +350,12 @@ Plan alleen een afspraak als de ondernemer:
 ${slotInfo}
 
 EXTRA BELANGRIJK:
-Schrijf antwoorden alsof ze direct door ElevenLabs uitgesproken worden.
-Dus:
-- kort
-- ritmisch
-- natuurlijk
-- spreekbaar
-- menselijk
+Varieer je zinnen.
+Gebruik niet steeds hetzelfde patroon.
+Kies liever "een beetje", "ongeveer", "toevallig", "eigenlijk", "heel kort" dan harde formuleringen.
+
+Je output moet direct geschikt zijn voor ElevenLabs.
+Dus: kort, ritmisch, natuurlijk, spreekbaar, menselijk.
 
 Geef nu het best mogelijke natuurlijke telefonische antwoord op basis van de gesprekshistorie.
 `.trim();
@@ -433,8 +465,8 @@ async function startGesprekEnBel({ naam, telefoon, stad, email }) {
 app.get('/', (req, res) => {
   res.json({
     status: 'AI Beller backend actief',
-    versie: '7.0.0',
-    mode: 'natural-energy-outreach'
+    versie: '8.0.0',
+    mode: 'ultra-realistic-energy-outreach'
   });
 });
 
@@ -524,9 +556,9 @@ app.post('/api/elevenlabs/tts/:voiceId?', async (req, res) => {
         text,
         model_id: 'eleven_multilingual_v2',
         voice_settings: {
-          stability: 0.28,
-          similarity_boost: 0.92,
-          style: 0.48,
+          stability: 0.18,
+          similarity_boost: 0.88,
+          style: 0.62,
           use_speaker_boost: true
         }
       },
@@ -729,10 +761,7 @@ app.post('/twilio/answer/:gesprekId', async (req, res) => {
 
   gesprek.status = 'in_gesprek';
 
-  const opening = veiligeTekstVoorTTS(
-    `Goedemiddag, u spreekt met Eva van ${process.env.BEDRIJF_NAAM || 'Vaste Lasten Deals'}. Ik bel even heel kort, omdat we ondernemers helpen kijken of hun zakelijke energievoorwaarden nog gunstig zijn. En ik wilde eigenlijk even checken, zit u op dit moment nog variabel, of vast?`
-  );
-
+  const opening = veiligeTekstVoorTTS(kiesOpening(gesprek.naam));
   gesprek.history.push({ role: 'assistant', content: opening });
 
   try {
