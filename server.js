@@ -32,6 +32,7 @@ const twilioClient = twilio(
 );
 
 const gesprekken = new Map();
+const audioCache = new Map();
 
 function log(...args) {
   console.log(new Date().toISOString(), ...args);
@@ -75,11 +76,179 @@ function veiligeTekstVoorTTS(text) {
     .trim();
 }
 
+async function genereerAntwoord(gesprek) {
+  const slotInfo = gesprek.vrijeSlots?.length
+    ? 'Beschikbare afspraakmomenten: ' + gesprek.vrijeSlots.slice(0, 3).map((s) => s.label).join(', ') + '.'
+    : 'De agenda is op dit moment beperkt beschikbaar.';
+
+  const system = [
+    `Je bent Eva, een zeer natuurlijke Nederlandse telefoonagent voor ${process.env.BEDRIJF_NAAM || 'Vaste Lasten Deals'}.`,
+    'Je belt prospects kort en duidelijk over een energieaanbod.',
+    'Spreek vloeiend Nederlands.',
+    'Klink warm, menselijk, zelfverzekerd en professioneel.',
+    'Gebruik korte zinnen die goed klinken in spraak.',
+    'Gebruik maximaal 2 of 3 zinnen per beurt.',
+    'Wees commercieel maar niet opdringerig.',
+    'Stuur rustig richting een afspraak als er interesse is.',
+    slotInfo
+  ].join(' ');
+
+  const messages = gesprek.history.length
+    ? gesprek.history.map((h) => ({ role: h.role, content: h.content }))
+    : [{ role: 'user', content: 'Begin het gesprek kort, vriendelijk en professioneel.' }];
+
+  const resp = await axios.post(
+    'https://api.anthropic.com/v1/messages',
+    {
+      model: 'claude-sonnet-4-20250514',
+      max_tokens: 180,
+      system,
+      messages
+    },
+    {
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': process.env.ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01'
+      },
+      timeout: 30000
+    }
+  );
+
+  return resp.data.content?.[0]?.text || 'Prima, dank u wel voor uw reactie.';
+}
+
+async function genAudioViaElevenLabs(tekst, id) {
+  const resp = await axios.post(
+    `https://api.elevenlabs.io/v1/text-to-speech/${process.env.ELEVENLABS_VOICE_ID}`,
+    {
+      text: veiligeTekstVoorTTS(tekst),
+      model_id: 'eleven_multilingual_v2',
+      voice_settings: {
+        stability: 0.35,
+        similarity_boost: 0.9,
+        style: 0.45,
+        use_speaker_boost: true
+      }
+    },
+    {
+      headers: {
+        'xi-api-key': process.env.ELEVENLABS_API_KEY,
+        'Content-Type': 'application/json'
+      },
+      responseType: 'arraybuffer',
+      timeout: 30000
+    }
+  );
+
+  audioCache.set(id, {
+    data: resp.data,
+    ts: Date.now()
+  });
+
+  setTimeout(() => {
+    audioCache.delete(id);
+  }, 5 * 60 * 1000);
+
+  return `${process.env.SERVER_URL}/audio/${id}`;
+}
+
+async function spreekEnLuister(twiml, tekst, gesprekId) {
+  const audioId = `${gesprekId}_${Date.now()}`;
+  const audioUrl = await genAudioViaElevenLabs(tekst, audioId);
+
+  twiml.play(audioUrl);
+
+  const gather = twiml.gather({
+    input: 'speech',
+    language: 'nl-NL',
+    speechTimeout: 'auto',
+    timeout: 8,
+    action: `${process.env.SERVER_URL}/twilio/gather/${gesprekId}`,
+    method: 'POST'
+  });
+
+  gather.pause({ length: 1 });
+}
+
+async function spreekEnSluitAf(twiml, tekst) {
+  const audioId = `af_${Date.now()}`;
+  const audioUrl = await genAudioViaElevenLabs(tekst, audioId);
+
+  twiml.play(audioUrl);
+  twiml.hangup();
+}
+
+async function startGesprekEnBel({ naam, telefoon, stad, email }) {
+  if (!naam || !telefoon) {
+    throw new Error('naam en telefoon verplicht');
+  }
+
+  const tel = normalizePhone(telefoon);
+  if (!tel) {
+    throw new Error('ongeldig telefoonnummer');
+  }
+
+  let vrijeSlots = [];
+  try {
+    vrijeSlots = await getVrijeSlots(5, 60);
+  } catch (e) {
+    log('AGENDA WAARSCHUWING:', e.message);
+  }
+
+  const gesprekId = 'g_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7);
+
+  gesprekken.set(gesprekId, {
+    naam,
+    telefoon: tel,
+    stad: stad || '',
+    email: email || '',
+    history: [],
+    gestart: new Date().toISOString(),
+    status: 'bellen_gestart',
+    resultaat: null,
+    vrijeSlots,
+    wachtOpSlotKeuze: false,
+    metadata: {}
+  });
+
+  log('TWILIO CALL CREATE START', {
+    gesprekId,
+    to: tel,
+    from: process.env.TWILIO_PHONE_NUMBER
+  });
+
+  const call = await twilioClient.calls.create({
+    to: tel,
+    from: process.env.TWILIO_PHONE_NUMBER,
+    url: `${process.env.SERVER_URL}/twilio/answer/${gesprekId}`,
+    statusCallback: `${process.env.SERVER_URL}/twilio/status/${gesprekId}`,
+    statusCallbackEvent: ['initiated', 'ringing', 'answered', 'completed'],
+    timeout: 30
+  });
+
+  const gesprek = gesprekken.get(gesprekId);
+  gesprek.twilioSid = call.sid;
+  gesprek.status = 'bellen';
+
+  log('TWILIO CALL CREATED', {
+    gesprekId,
+    twilioSid: call.sid
+  });
+
+  return {
+    success: true,
+    gesprekId,
+    twilioSid: call.sid,
+    aantalVrijeSlots: vrijeSlots.length
+  };
+}
+
 app.get('/', (req, res) => {
   res.json({
     status: 'AI Beller backend actief',
-    versie: '4.0.0',
-    mode: 'twilio-voice-stable'
+    versie: '5.0.0',
+    mode: 'full-elevenlabs-phone'
   });
 });
 
@@ -167,10 +336,12 @@ app.post('/api/elevenlabs/tts/:voiceId?', async (req, res) => {
       `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}`,
       {
         text,
-        model_id: req.body.model_id || 'eleven_multilingual_v2',
-        voice_settings: req.body.voice_settings || {
-          stability: 0.5,
-          similarity_boost: 0.75
+        model_id: 'eleven_multilingual_v2',
+        voice_settings: {
+          stability: 0.35,
+          similarity_boost: 0.9,
+          style: 0.45,
+          use_speaker_boost: true
         }
       },
       {
@@ -204,6 +375,17 @@ app.get('/api/elevenlabs/tts/test', (req, res) => {
   });
 });
 
+app.get('/audio/:id', (req, res) => {
+  const item = audioCache.get(req.params.id);
+
+  if (!item) {
+    return res.status(404).send('Audio niet gevonden');
+  }
+
+  res.setHeader('Content-Type', 'audio/mpeg');
+  res.send(Buffer.from(item.data));
+});
+
 app.get('/api/gesprekken', (req, res) => {
   res.json(
     Array.from(gesprekken.entries())
@@ -219,71 +401,6 @@ app.get('/api/gesprek/:id', (req, res) => {
   }
   res.json(g);
 });
-
-async function startGesprekEnBel({ naam, telefoon, stad, email }) {
-  if (!naam || !telefoon) {
-    throw new Error('naam en telefoon verplicht');
-  }
-
-  const tel = normalizePhone(telefoon);
-  if (!tel) {
-    throw new Error('ongeldig telefoonnummer');
-  }
-
-  let vrijeSlots = [];
-  try {
-    vrijeSlots = await getVrijeSlots(5, 60);
-  } catch (e) {
-    log('AGENDA WAARSCHUWING:', e.message);
-  }
-
-  const gesprekId = 'g_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7);
-
-  gesprekken.set(gesprekId, {
-    naam,
-    telefoon: tel,
-    stad: stad || '',
-    email: email || '',
-    history: [],
-    gestart: new Date().toISOString(),
-    status: 'bellen_gestart',
-    resultaat: null,
-    vrijeSlots,
-    wachtOpSlotKeuze: false,
-    metadata: {}
-  });
-
-  log('TWILIO CALL CREATE START', {
-    gesprekId,
-    to: tel,
-    from: process.env.TWILIO_PHONE_NUMBER
-  });
-
-  const call = await twilioClient.calls.create({
-    to: tel,
-    from: process.env.TWILIO_PHONE_NUMBER,
-    url: `${process.env.SERVER_URL}/twilio/answer/${gesprekId}`,
-    statusCallback: `${process.env.SERVER_URL}/twilio/status/${gesprekId}`,
-    statusCallbackEvent: ['initiated', 'ringing', 'answered', 'completed'],
-    timeout: 30
-  });
-
-  const gesprek = gesprekken.get(gesprekId);
-  gesprek.twilioSid = call.sid;
-  gesprek.status = 'bellen';
-
-  log('TWILIO CALL CREATED', {
-    gesprekId,
-    twilioSid: call.sid
-  });
-
-  return {
-    success: true,
-    gesprekId,
-    twilioSid: call.sid,
-    aantalVrijeSlots: vrijeSlots.length
-  };
-}
 
 app.post('/api/start-call', async (req, res) => {
   try {
@@ -410,10 +527,16 @@ app.post('/twilio/answer/:gesprekId', async (req, res) => {
   });
 
   if (!gesprek) {
-    twiml.say(
-      { language: 'nl-NL', voice: 'Polly.Lotte' },
-      'Excuses, gesprek niet gevonden.'
-    );
+    try {
+      const audioUrl = await genAudioViaElevenLabs(
+        'Excuses, gesprek niet gevonden.',
+        `missing_${Date.now()}`
+      );
+      twiml.play(audioUrl);
+    } catch {
+      twiml.say({ language: 'nl-NL', voice: 'Polly.Lotte' }, 'Excuses, gesprek niet gevonden.');
+    }
+
     twiml.hangup();
     return res.type('text/xml').send(twiml.toString());
   }
@@ -426,7 +549,16 @@ app.post('/twilio/answer/:gesprekId', async (req, res) => {
 
   gesprek.history.push({ role: 'assistant', content: opening });
 
-  twiml.say({ language: 'nl-NL', voice: 'Polly.Lotte' }, opening);
+  try {
+    const audioUrl = await genAudioViaElevenLabs(
+      opening,
+      `${req.params.gesprekId}_opening_${Date.now()}`
+    );
+    twiml.play(audioUrl);
+  } catch (err) {
+    log('OPENING ELEVENLABS FOUT, FALLBACK POLLY:', err.message);
+    twiml.say({ language: 'nl-NL', voice: 'Polly.Lotte' }, opening);
+  }
 
   const gather = twiml.gather({
     input: 'speech',
@@ -437,7 +569,7 @@ app.post('/twilio/answer/:gesprekId', async (req, res) => {
     method: 'POST'
   });
 
-  gather.say({ language: 'nl-NL', voice: 'Polly.Lotte' }, 'Ik luister.');
+  gather.pause({ length: 1 });
 
   return res.type('text/xml').send(twiml.toString());
 });
@@ -454,7 +586,16 @@ app.post('/twilio/gather/:gesprekId', async (req, res) => {
   });
 
   if (!gesprek) {
-    twiml.say({ language: 'nl-NL', voice: 'Polly.Lotte' }, 'Gesprek niet gevonden.');
+    try {
+      const audioUrl = await genAudioViaElevenLabs(
+        'Gesprek niet gevonden.',
+        `missing_gather_${Date.now()}`
+      );
+      twiml.play(audioUrl);
+    } catch {
+      twiml.say({ language: 'nl-NL', voice: 'Polly.Lotte' }, 'Gesprek niet gevonden.');
+    }
+
     twiml.hangup();
     return res.type('text/xml').send(twiml.toString());
   }
@@ -462,11 +603,20 @@ app.post('/twilio/gather/:gesprekId', async (req, res) => {
   const klantTekst = (req.body.SpeechResult || '').trim();
 
   if (!klantTekst) {
-    await spreekEnLuister(
-      twiml,
-      'Ik heb u niet goed verstaan. Kunt u dat alstublieft herhalen?',
-      gesprekId
-    );
+    try {
+      await spreekEnLuister(
+        twiml,
+        'Ik heb u niet goed verstaan. Kunt u dat alstublieft herhalen?',
+        gesprekId
+      );
+    } catch (err) {
+      log('GEEN SPRAAK / ELEVENLABS FOUT:', err.message);
+      twiml.say(
+        { language: 'nl-NL', voice: 'Polly.Lotte' },
+        'Ik heb u niet goed verstaan. Kunt u dat alstublieft herhalen?'
+      );
+    }
+
     return res.type('text/xml').send(twiml.toString());
   }
 
@@ -479,10 +629,19 @@ app.post('/twilio/gather/:gesprekId', async (req, res) => {
     gesprek.status = 'afgerond';
     gesprek.resultaat = 'opt_out';
 
-    await spreekEnSluitAf(
-      twiml,
-      'Begrijpelijk. We zullen uw gegevens niet verder gebruiken. Bedankt en nog een fijne dag.'
-    );
+    try {
+      await spreekEnSluitAf(
+        twiml,
+        'Begrijpelijk. We zullen uw gegevens niet verder gebruiken. Bedankt en nog een fijne dag.'
+      );
+    } catch (err) {
+      log('OPT OUT ELEVENLABS FOUT:', err.message);
+      twiml.say(
+        { language: 'nl-NL', voice: 'Polly.Lotte' },
+        'Begrijpelijk. We zullen uw gegevens niet verder gebruiken. Bedankt en nog een fijne dag.'
+      );
+      twiml.hangup();
+    }
 
     return res.type('text/xml').send(twiml.toString());
   }
@@ -516,26 +675,48 @@ app.post('/twilio/gather/:gesprekId', async (req, res) => {
         );
 
         gesprek.history.push({ role: 'assistant', content: bevestiging });
-        await spreekEnSluitAf(twiml, bevestiging);
+
+        try {
+          await spreekEnSluitAf(twiml, bevestiging);
+        } catch (err) {
+          log('AFSPRAAK BEVESTIGING ELEVENLABS FOUT:', err.message);
+          twiml.say({ language: 'nl-NL', voice: 'Polly.Lotte' }, bevestiging);
+          twiml.hangup();
+        }
+
         return res.type('text/xml').send(twiml.toString());
       } catch (err) {
         log('AGENDA BOEKEN MISLUKT:', err.message);
 
-        await spreekEnLuister(
-          twiml,
-          'Het lukt op dit moment niet om de afspraak direct vast te leggen. Ik kan wel een terugbelverzoek voor u noteren. Heeft u daar interesse in?',
-          gesprekId
-        );
+        try {
+          await spreekEnLuister(
+            twiml,
+            'Het lukt op dit moment niet om de afspraak direct vast te leggen. Ik kan wel een terugbelverzoek voor u noteren. Heeft u daar interesse in?',
+            gesprekId
+          );
+        } catch (e) {
+          twiml.say(
+            { language: 'nl-NL', voice: 'Polly.Lotte' },
+            'Het lukt op dit moment niet om de afspraak direct vast te leggen. Ik kan wel een terugbelverzoek voor u noteren. Heeft u daar interesse in?'
+          );
+        }
 
         return res.type('text/xml').send(twiml.toString());
       }
     }
 
-    await spreekEnLuister(
-      twiml,
-      'Ik kon het gekozen tijdstip niet goed herkennen. Wilt u een van de genoemde momenten herhalen?',
-      gesprekId
-    );
+    try {
+      await spreekEnLuister(
+        twiml,
+        'Ik kon het gekozen tijdstip niet goed herkennen. Wilt u een van de genoemde momenten herhalen?',
+        gesprekId
+      );
+    } catch (err) {
+      twiml.say(
+        { language: 'nl-NL', voice: 'Polly.Lotte' },
+        'Ik kon het gekozen tijdstip niet goed herkennen. Wilt u een van de genoemde momenten herhalen?'
+      );
+    }
 
     return res.type('text/xml').send(twiml.toString());
   }
@@ -553,12 +734,16 @@ app.post('/twilio/gather/:gesprekId', async (req, res) => {
 
     if (gesprek.vrijeSlots.length) {
       const slotTekst = slotsAlsTekst(gesprek.vrijeSlots);
-      const antwoord = veiligeTekstVoorTTS(
-        `Graag. ${slotTekst} Welk moment past u het beste?`
-      );
+      const antwoord = veiligeTekstVoorTTS(`Graag. ${slotTekst} Welk moment past u het beste?`);
 
       gesprek.history.push({ role: 'assistant', content: antwoord });
-      await spreekEnLuister(twiml, antwoord, gesprekId);
+
+      try {
+        await spreekEnLuister(twiml, antwoord, gesprekId);
+      } catch (err) {
+        twiml.say({ language: 'nl-NL', voice: 'Polly.Lotte' }, antwoord);
+      }
+
       return res.type('text/xml').send(twiml.toString());
     }
 
@@ -567,7 +752,13 @@ app.post('/twilio/gather/:gesprekId', async (req, res) => {
     );
 
     gesprek.history.push({ role: 'assistant', content: fallbackAntwoord });
-    await spreekEnLuister(twiml, fallbackAntwoord, gesprekId);
+
+    try {
+      await spreekEnLuister(twiml, fallbackAntwoord, gesprekId);
+    } catch (err) {
+      twiml.say({ language: 'nl-NL', voice: 'Polly.Lotte' }, fallbackAntwoord);
+    }
+
     return res.type('text/xml').send(twiml.toString());
   }
 
@@ -578,20 +769,37 @@ app.post('/twilio/gather/:gesprekId', async (req, res) => {
     if (gesprek.history.length >= 20) {
       gesprek.status = 'afgerond';
       gesprek.resultaat = gesprek.resultaat || 'afgerond';
-      await spreekEnSluitAf(twiml, antwoord);
+
+      try {
+        await spreekEnSluitAf(twiml, antwoord);
+      } catch (err) {
+        twiml.say({ language: 'nl-NL', voice: 'Polly.Lotte' }, antwoord);
+        twiml.hangup();
+      }
     } else {
-      await spreekEnLuister(twiml, antwoord, gesprekId);
+      try {
+        await spreekEnLuister(twiml, antwoord, gesprekId);
+      } catch (err) {
+        twiml.say({ language: 'nl-NL', voice: 'Polly.Lotte' }, antwoord);
+      }
     }
 
     return res.type('text/xml').send(twiml.toString());
   } catch (err) {
     log('GATHER FOUT:', err.message);
 
-    await spreekEnLuister(
-      twiml,
-      'Excuses, er ging iets mis aan onze kant. Wilt u aangeven of u interesse heeft in een afspraak?',
-      gesprekId
-    );
+    try {
+      await spreekEnLuister(
+        twiml,
+        'Excuses, er ging iets mis aan onze kant. Wilt u aangeven of u interesse heeft in een afspraak?',
+        gesprekId
+      );
+    } catch (e) {
+      twiml.say(
+        { language: 'nl-NL', voice: 'Polly.Lotte' },
+        'Excuses, er ging iets mis aan onze kant. Wilt u aangeven of u interesse heeft in een afspraak?'
+      );
+    }
 
     return res.type('text/xml').send(twiml.toString());
   }
@@ -628,67 +836,6 @@ app.post('/twilio/status/:gesprekId', (req, res) => {
 
   res.sendStatus(200);
 });
-
-async function genereerAntwoord(gesprek) {
-  const slotInfo = gesprek.vrijeSlots?.length
-    ? 'Beschikbare afspraakmomenten: ' + gesprek.vrijeSlots.slice(0, 3).map((s) => s.label).join(', ') + '.'
-    : 'De agenda is op dit moment beperkt beschikbaar.';
-
-  const system = [
-    `Je bent Eva, een vriendelijke Nederlandse telefoonagent voor ${process.env.BEDRIJF_NAAM || 'Vaste Lasten Deals'}.`,
-    'Je belt prospects kort en duidelijk over een energieaanbod.',
-    'Spreek vloeiend Nederlands.',
-    'Houd antwoorden natuurlijk en geschikt voor telefoon.',
-    'Gebruik maximaal 2 of 3 zinnen per beurt.',
-    'Wees commercieel maar niet opdringerig.',
-    'Stuur subtiel richting een afspraak als er interesse is.',
-    slotInfo
-  ].join(' ');
-
-  const messages = gesprek.history.length
-    ? gesprek.history.map((h) => ({ role: h.role, content: h.content }))
-    : [{ role: 'user', content: 'Begin het gesprek kort en professioneel.' }];
-
-  const resp = await axios.post(
-    'https://api.anthropic.com/v1/messages',
-    {
-      model: 'claude-sonnet-4-20250514',
-      max_tokens: 180,
-      system,
-      messages
-    },
-    {
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': process.env.ANTHROPIC_API_KEY,
-        'anthropic-version': '2023-06-01'
-      },
-      timeout: 30000
-    }
-  );
-
-  return resp.data.content?.[0]?.text || 'Prima, dank u wel voor uw reactie.';
-}
-
-async function spreekEnLuister(twiml, tekst, gesprekId) {
-  twiml.say({ language: 'nl-NL', voice: 'Polly.Lotte' }, veiligeTekstVoorTTS(tekst));
-
-  const gather = twiml.gather({
-    input: 'speech',
-    language: 'nl-NL',
-    speechTimeout: 'auto',
-    timeout: 8,
-    action: `${process.env.SERVER_URL}/twilio/gather/${gesprekId}`,
-    method: 'POST'
-  });
-
-  gather.say({ language: 'nl-NL', voice: 'Polly.Lotte' }, 'Ik luister.');
-}
-
-async function spreekEnSluitAf(twiml, tekst) {
-  twiml.say({ language: 'nl-NL', voice: 'Polly.Lotte' }, veiligeTekstVoorTTS(tekst));
-  twiml.hangup();
-}
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
