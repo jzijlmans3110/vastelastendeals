@@ -7,7 +7,18 @@ const rateLimit = require('express-rate-limit');
 const { getVrijeSlots, boekAfspraak, slotsAlsTekst, parseGekozenSlot } = require('./calendar');
 
 const app = express();
-app.use(cors({ origin: process.env.FRONTEND_URL || '*' }));
+
+// CORS FIX
+app.use(cors({
+  origin: [
+    'https://vastelastendeals.lovable.app',
+    'http://localhost:3000',
+    'http://localhost:5173'
+  ],
+  methods: ['GET', 'POST', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
+}));
+
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 app.use('/api/', rateLimit({ windowMs: 3600000, max: 200 }));
@@ -16,22 +27,28 @@ const twilioClient = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_A
 const gesprekken = new Map();
 const audioCache = new Map();
 
-// ── HEALTH ────────────────────────────────────────────────────────────────────
+// HEALTH
 app.get('/', (req, res) => {
-  res.json({ status: 'AI Beller + Calendar actief', versie: '2.1.0' });
+  res.json({ status: 'AI Beller + Calendar actief', versie: '2.2.0' });
 });
 
-// ── VRIJE SLOTS OPHALEN (voor frontend kalenderweergave) ──────────────────────
+// SLOTS
 app.get('/api/slots', async (req, res) => {
   try {
     const slots = await getVrijeSlots(7, 60);
-    res.json({ slots: slots.map(s => ({ label: s.label, start: s.start, eind: s.eind })) });
+    res.json({
+      slots: slots.map(s => ({
+        label: s.label,
+        start: s.start,
+        eind: s.eind
+      }))
+    });
   } catch (err) {
     res.status(500).json({ error: 'Kon agenda niet ophalen: ' + err.message });
   }
 });
 
-// ── CLAUDE PROXY VOOR FRONTEND / LOVABLE ──────────────────────────────────────
+// CLAUDE PROXY
 app.post('/api/claude', async (req, res) => {
   try {
     const {
@@ -68,7 +85,7 @@ app.post('/api/claude', async (req, res) => {
   }
 });
 
-// ── ELEVENLABS TTS PROXY VOOR FRONTEND / LOVABLE ──────────────────────────────
+// ELEVENLABS TTS PROXY
 app.post('/api/elevenlabs/tts/:voiceId?', async (req, res) => {
   try {
     const voiceId =
@@ -117,7 +134,7 @@ app.post('/api/elevenlabs/tts/:voiceId?', async (req, res) => {
   }
 });
 
-// ── ELEVENLABS TEST ENDPOINT ──────────────────────────────────────────────────
+// ELEVENLABS TEST
 app.get('/api/elevenlabs/tts/test', (req, res) => {
   res.json({
     ok: true,
@@ -127,7 +144,7 @@ app.get('/api/elevenlabs/tts/test', (req, res) => {
   });
 });
 
-// ── HELPER: GESPREK MAKEN EN TWILIO CALL STARTEN ──────────────────────────────
+// HELPER OM CALL TE STARTEN
 async function startGesprekEnBel({ naam, telefoon, stad, email }) {
   if (!naam || !telefoon) {
     throw new Error('naam en telefoon verplicht');
@@ -177,7 +194,7 @@ async function startGesprekEnBel({ naam, telefoon, stad, email }) {
   };
 }
 
-// ── GESPREK STARTEN (OUDE ROUTE) ──────────────────────────────────────────────
+// OUDE ROUTE
 app.post('/api/start-call', async (req, res) => {
   try {
     const result = await startGesprekEnBel({
@@ -188,11 +205,12 @@ app.post('/api/start-call', async (req, res) => {
     });
     res.json(result);
   } catch (err) {
+    console.error('Start-call fout:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
 
-// ── GESPREK STARTEN (NIEUWE LOVABLE ROUTE) ────────────────────────────────────
+// NIEUWE LOVABLE ROUTE
 app.post('/api/call', async (req, res) => {
   try {
     const naam = req.body.naam || req.body.name || 'Lead';
@@ -213,12 +231,12 @@ app.post('/api/call', async (req, res) => {
 
     res.json(result);
   } catch (err) {
-    console.error('API call fout:', err.message);
+    console.error('API /api/call fout:', err.response?.data || err.message);
     res.status(500).json({ error: err.message });
   }
 });
 
-// ── TWILIO ANSWER ─────────────────────────────────────────────────────────────
+// TWILIO ANSWER
 app.post('/twilio/answer/:gesprekId', async (req, res) => {
   const gesprek = gesprekken.get(req.params.gesprekId);
   const twiml = new twilio.twiml.VoiceResponse();
@@ -230,10 +248,12 @@ app.post('/twilio/answer/:gesprekId', async (req, res) => {
         (process.env.BEDRIJF_NAAM || 'Vaste Lasten Deals') +
         '. Wij belden u over uw energiecontract. Bel ons gerust terug. Een fijne dag!'
     );
+
     if (gesprek) {
       gesprek.status = 'voicemail';
       gesprek.resultaat = 'voicemail';
     }
+
     return res.type('text/xml').send(twiml.toString());
   }
 
@@ -261,7 +281,7 @@ app.post('/twilio/answer/:gesprekId', async (req, res) => {
   }
 });
 
-// ── TWILIO GATHER (klant heeft gesproken) ─────────────────────────────────────
+// TWILIO GATHER
 app.post('/twilio/gather/:gesprekId', async (req, res) => {
   const { gesprekId } = req.params;
   const gesprek = gesprekken.get(gesprekId);
@@ -274,7 +294,10 @@ app.post('/twilio/gather/:gesprekId', async (req, res) => {
 
   const klantTekst = (req.body.SpeechResult || '').trim();
   console.log('[' + gesprekId + '] Klant: "' + klantTekst + '"');
-  if (klantTekst) gesprek.history.push({ role: 'user', content: klantTekst });
+
+  if (klantTekst) {
+    gesprek.history.push({ role: 'user', content: klantTekst });
+  }
 
   const optOut = ['verwijder', 'afmelden', 'bel niet meer', 'nooit meer', 'stop', 'doe dat niet'];
   if (optOut.some(w => klantTekst.toLowerCase().includes(w))) {
@@ -305,7 +328,10 @@ app.post('/twilio/gather/:gesprekId', async (req, res) => {
 
         gesprek.status = 'afgerond';
         gesprek.resultaat = 'afspraak';
-        gesprek.afspraak = { slot: gekozenSlot.label, eventId: event.id };
+        gesprek.afspraak = {
+          slot: gekozenSlot.label,
+          eventId: event.id
+        };
 
         const bevestiging =
           'Uitstekend! Ik heb de afspraak voor u ingepland op ' +
@@ -345,6 +371,7 @@ app.post('/twilio/gather/:gesprekId', async (req, res) => {
   }
 
   const maxBereikt = gesprek.history.length >= 20;
+
   try {
     const antwoord = await genereerAntwoord(gesprek, klantTekst);
     gesprek.history.push({ role: 'assistant', content: antwoord });
@@ -366,9 +393,10 @@ app.post('/twilio/gather/:gesprekId', async (req, res) => {
   }
 });
 
-// ── STATUS CALLBACKS ──────────────────────────────────────────────────────────
+// STATUS CALLBACK
 app.post('/twilio/status/:gesprekId', (req, res) => {
   const gesprek = gesprekken.get(req.params.gesprekId);
+
   if (gesprek) {
     gesprek.eindStatus = req.body.CallStatus;
     gesprek.duur = req.body.CallDuration;
@@ -384,10 +412,11 @@ app.post('/twilio/status/:gesprekId', (req, res) => {
       gesprek.resultaat = map[req.body.CallStatus] || req.body.CallStatus;
     }
   }
+
   res.sendStatus(200);
 });
 
-// ── API ENDPOINTS VOOR FRONTEND ───────────────────────────────────────────────
+// API VOOR FRONTEND
 app.get('/api/gesprekken', (req, res) => {
   res.json(
     Array.from(gesprekken.entries())
@@ -429,7 +458,10 @@ app.post('/api/stop-call/:id', async (req, res) => {
 
 app.post('/api/bulk-start', async (req, res) => {
   const { leads, vertraging_seconden = 90 } = req.body;
-  if (!leads?.length) return res.status(400).json({ error: 'leads array verplicht' });
+
+  if (!leads?.length) {
+    return res.status(400).json({ error: 'leads array verplicht' });
+  }
 
   let vrijeSlots = [];
   try {
@@ -483,7 +515,7 @@ app.post('/api/bulk-start', async (req, res) => {
   }
 });
 
-// ── HELPERS ───────────────────────────────────────────────────────────────────
+// HELPERS
 async function genereerAntwoord(gesprek, klantTekst) {
   const slotInfo = gesprek.vrijeSlots?.length
     ? 'Beschikbare afspraakmomenten: ' + gesprek.vrijeSlots.slice(0, 3).map(s => s.label).join(', ') + '.'
@@ -495,7 +527,7 @@ async function genereerAntwoord(gesprek, klantTekst) {
     'Spreek vloeiend Nederlands. Max 2-3 zinnen per beurt. Noem NIET dat je een AI bent tenzij gevraagd.',
     slotInfo,
     'Als de klant wil afspreken, noem dan de beschikbare tijden en vraag welke past.',
-    'Wacht tot de klant een dag/tijd kiest voordat je de afspraak bevestigt.'
+    'Wacht tot de klant een dag of tijd kiest voordat je de afspraak bevestigt.'
   ].join(' ');
 
   const messages =
@@ -509,7 +541,10 @@ async function genereerAntwoord(gesprek, klantTekst) {
               ' en leg het doel uit.'
           }
         ]
-      : gesprek.history.map(h => ({ role: h.role, content: h.content }));
+      : gesprek.history.map(h => ({
+          role: h.role,
+          content: h.content
+        }));
 
   const resp = await axios.post(
     'https://api.anthropic.com/v1/messages',
@@ -549,7 +584,8 @@ async function spreekEnLuister(twiml, tekst, gesprekId) {
     speechModel: 'googlev2_telephony',
     enhanced: true,
     timeout: 8,
-    action: process.env.SERVER_URL + '/twilio/gather/' + gesprekId
+    action: process.env.SERVER_URL + '/twilio/gather/' + gesprekId,
+    method: 'POST'
   });
 
   gather.say({ language: 'nl-NL', voice: 'Polly.Lotte' }, 'Bent u er nog?');
